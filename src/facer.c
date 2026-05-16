@@ -387,7 +387,9 @@ module_param(force_series, int, 0444);
 module_param(force_caps, int, 0444);
 module_param(ec_raw_mode, bool, 0444);
 module_param(cycle_gaming_thermal_profile, bool, 0644);
+static bool rgb_only;
 module_param(predator_v4, bool, 0444);
+module_param(rgb_only, bool, 0444);
 MODULE_PARM_DESC(mailled, "Set initial state of Mail LED");
 MODULE_PARM_DESC(brightness, "Set initial LCD backlight brightness");
 MODULE_PARM_DESC(threeg, "Set initial state of 3G hardware");
@@ -398,6 +400,8 @@ MODULE_PARM_DESC(cycle_gaming_thermal_profile,
 	"Set thermal mode key in cycle mode. Disabling it sets the mode key in turbo toggle mode");
 MODULE_PARM_DESC(predator_v4,
 	"Enable features for predator laptops that use predator sense v4");
+MODULE_PARM_DESC(rgb_only,
+	"Skip platform_profile registration (for coexistence with acer_wmi). Only expose RGB char devices.");
 
 #ifdef lts
 int platform_profile_remove()
@@ -554,6 +558,7 @@ static struct quirk_entry quirk_acer_predator_phn16_71 = {
 	.turbo = 1,
 	.cpu_fans = 1,
 	.gpu_fans = 1,
+	.predator_v4 = 1,  /* PHN16-71: exposes platform_profile + fan speed via WMI v4 */
 };
 
 static struct quirk_entry quirk_acer_predator_phn16_72 = {
@@ -2816,6 +2821,7 @@ acer_predator_v4_platform_profile_probe(void *drvdata, unsigned long *choices)
 {
 	unsigned long supported_profiles;
 	int err;
+	int profile_count = 0;
 
 	err = WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES,
 					   (u8 *)&supported_profiles);
@@ -2827,42 +2833,59 @@ acer_predator_v4_platform_profile_probe(void *drvdata, unsigned long *choices)
 		set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
 		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
 		last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+		profile_count++;
 	}
 
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_QUIET, choices);
 		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
 		last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
+		profile_count++;
 	}
 
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_BALANCED, choices);
 		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
 		last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+		profile_count++;
 	}
 
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_BALANCED_PERFORMANCE, choices);
 		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
 
-		/* We only use this profile as a fallback option in case no prior
-		 * profile is supported.
-		 */
 		if (last_non_turbo_profile < 0)
 			last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+		profile_count++;
 	}
 
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
 		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
 
-		/* We need to handle the hypothetical case where only the turbo profile
-		 * is supported. In this case the turbo toggle will essentially be a
-		 * no-op.
-		 */
 		if (last_non_turbo_profile < 0)
 			last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+		profile_count++;
 	}
+
+	/*
+	 * PHN16-71 BIOS firmware bug: MISC_SETTING_SUPPORTED_PROFILES query only
+	 * returns eco/quiet/balanced bitmask, but hardware supports all 5 profiles.
+	 * acer_wmi with predator_v4=1 module param confirms all 5 are writable.
+	 * Force full profile set when WMI probe returns fewer than 5 profiles.
+	 */
+	if (profile_count < 5) {
+		pr_info("WMI returned %d profiles; forcing full 5-profile set for PHN16-71\n",
+			profile_count);
+		set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
+		set_bit(PLATFORM_PROFILE_QUIET, choices);
+		set_bit(PLATFORM_PROFILE_BALANCED, choices);
+		set_bit(PLATFORM_PROFILE_BALANCED_PERFORMANCE, choices);
+		set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
+		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+		last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED_WMI;
+	}
+
 
 	return 0;
 }
@@ -3597,7 +3620,7 @@ static int acer_platform_probe(struct platform_device *device)
 	if (err)
 		goto error_rfkill;
 
-	if (has_cap(ACER_CAP_PLATFORM_PROFILE)) {
+	if (!rgb_only && has_cap(ACER_CAP_PLATFORM_PROFILE)) {
 		#if RTLNX_VER_MIN(6, 14, 0)
 		err = acer_platform_profile_setup(device);
 		#else
