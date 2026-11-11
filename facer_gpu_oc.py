@@ -62,14 +62,14 @@ class NvmlClockOffset(ctypes.Structure):
 NVML_CLOCK_OFFSET_V1 = ctypes.sizeof(NvmlClockOffset) | (1 << 24)
 
 
-def log(msg):
+def log(msg: str) -> None:
     print(msg, flush=True)
 
 
 class Nvml:
     """Short-lived NVML session: holding NVML open would keep the GPU awake."""
 
-    def __init__(self, index):
+    def __init__(self, index: int) -> None:
         self.lib = ctypes.CDLL("libnvidia-ml.so.1")
         self._check(self.lib.nvmlInit_v2(), "nvmlInit")
         self.handle = ctypes.c_void_p()
@@ -80,18 +80,18 @@ class Nvml:
             self.lib.nvmlShutdown()
             raise
 
-    def _check(self, ret, what):
+    def _check(self, ret: int, what: str) -> None:
         if ret != NVML_SUCCESS:
             self.lib.nvmlErrorString.restype = ctypes.c_char_p
             raise RuntimeError(f"{what}: {self.lib.nvmlErrorString(ret).decode()}")
 
-    def __enter__(self):
+    def __enter__(self) -> "Nvml":
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc) -> None:
         self.lib.nvmlShutdown()
 
-    def offsets(self):
+    def offsets(self) -> tuple[int, int]:
         core, mem = ctypes.c_int(), ctypes.c_int()
         self._check(self.lib.nvmlDeviceGetGpcClkVfOffset(
             self.handle, ctypes.byref(core)), "nvmlDeviceGetGpcClkVfOffset")
@@ -100,8 +100,8 @@ class Nvml:
         return core.value, mem.value
 
     def set_offsets(self, core, mem):
+        # Check for P0 offsets support (Driver 555+: like NvAPI_GPU_SetPstates20 on Windows)
         if hasattr(self.lib, "nvmlDeviceSetClockOffsets"):
-            # Driver 555+: P0 offsets, like NvAPI_GPU_SetPstates20 on Windows
             for clock, value in ((NVML_CLOCK_GRAPHICS, core), (NVML_CLOCK_MEM, mem)):
                 info = NvmlClockOffset(version=NVML_CLOCK_OFFSET_V1, type=clock,
                                        pstate=NVML_PSTATE_0, clockOffsetMHz=value)
@@ -115,7 +115,8 @@ class Nvml:
                     "nvmlDeviceSetMemClkVfOffset")
 
 
-def read(path, default=None):
+def read(path: str, default: str | None = None) -> str | None:
+    """Read a file and return its stripped contents, or default if missing."""
     try:
         with open(path) as f:
             return f.read().strip()
@@ -123,7 +124,7 @@ def read(path, default=None):
         return default
 
 
-def power_supplies():
+def power_supplies() -> tuple[bool, int | None]:
     """Return (on_ac, battery_percent or None)."""
     on_ac, capacity = False, None
     for supply in glob.glob("/sys/class/power_supply/*"):
@@ -137,7 +138,7 @@ def power_supplies():
     return on_ac, capacity
 
 
-def gpu_awake():
+def gpu_awake() -> bool:
     """False when the dGPU is runtime-suspended: NVML would wake it up."""
     for dev in glob.glob("/sys/bus/pci/drivers/nvidia/0000:*"):
         if read(os.path.join(dev, "power/runtime_status"), "active") != "active":
@@ -146,13 +147,13 @@ def gpu_awake():
 
 
 class Daemon:
-    def __init__(self, args):
+    def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.oc_profiles = set(args.profiles.split(","))
         self.battery_ok = True
-        self.applied = None  # (core, mem) in NVML units, as last read back
+        self.applied: tuple[int, int] | None = None  # (core, mem) in NVML units, as last read back
 
-    def wanted(self):
+    def wanted(self) -> tuple[str, tuple[int, int]]:
         profile = read(PROFILE_PATH, "")
         on_ac, capacity = power_supplies()
         if capacity is not None:
@@ -164,7 +165,7 @@ class Daemon:
             return profile, (self.args.core, self.args.mem * 2)
         return profile, (0, 0)
 
-    def sync(self):
+    def sync(self) -> None:
         profile, target = self.wanted()
         # Nothing applied and nothing wanted: leave the GPU alone (and asleep)
         if target == (0, 0) and self.applied == (0, 0):
@@ -186,7 +187,7 @@ class Daemon:
             self.applied = None
             log(f"NVML: {err}")
 
-    def run(self):
+    def run(self) -> None:
         fd = os.open(PROFILE_PATH, os.O_RDONLY)
         poller = select.poll()
         poller.register(fd, select.POLLPRI | select.POLLERR)
@@ -197,11 +198,12 @@ class Daemon:
                 os.read(fd, 64)  # sysfs needs a read before the next poll
             except OSError:
                 # facer was unloaded: let systemd restart us once it is back
-                self.reset()
+                self._reset_safe()
                 sys.exit(f"facer_gpu_oc: {PROFILE_PATH} went away")
             poller.poll(self.args.interval * 1000)
 
-    def reset(self):
+    def _reset_safe(self) -> None:
+        """Reset GPU offsets; safe to call from signal handlers."""
         if self.applied not in (None, (0, 0)):
             try:
                 with Nvml(self.args.gpu) as nvml:
@@ -211,7 +213,7 @@ class Daemon:
                 log(f"NVML: {err}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--core", type=int, default=100,
                         help="core offset in MHz (PredatorSense: Turbo=100)")
@@ -233,8 +235,8 @@ def main():
 
     daemon = Daemon(args)
 
-    def stop(*_):
-        daemon.reset()
+    def stop(*_) -> None:
+        daemon._reset_safe()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, stop)

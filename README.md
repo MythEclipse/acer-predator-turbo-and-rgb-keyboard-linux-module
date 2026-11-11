@@ -152,12 +152,12 @@ sed 's#/usr/bin/nvidia-powerd#/usr/sbin/nvidia-powerd#' /usr/share/doc/nvidia-po
 sudo systemctl daemon-reload && sudo systemctl reload dbus && sudo systemctl enable --now nvidia-powerd
 ```
 
-For RGB, the module will mount a new character device at `/dev/acer-gkbbl-0` to communicate with kernel space. 
+For RGB, the module will mount a new character device at `/dev/acer-gkbbl-0` to communicate with kernel space.
 
-You can use the `keyboard.py`, which is a simple script that provides an easy-to-understand CLI for setting your keyboard RGB. To run the script, just use the following command 
+You can use the `facer_rgb.py` script which provides a CLI for setting your keyboard RGB. To run the script with default options:
 
 ```bash
-python keyboard.py
+./facer_rgb.py
 ```
 
 If you want more control, you also have access to the `facer_rgb.py`; this can be useful if you are building your scripts. Instruction for using `facer_rgb.py` is given below, or check the help for more advanced usage:  

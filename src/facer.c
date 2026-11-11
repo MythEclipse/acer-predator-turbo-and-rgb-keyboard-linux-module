@@ -1314,12 +1314,6 @@ static bool platform_profile_support;
  */
 static int last_non_turbo_profile = INT_MIN;
 
-/*
- * The profile used before turbo mode. This variable is needed for
- * returning from turbo mode when the mode key is in toggle mode.
- */
-static int last_non_turbo_profile;
-
 /* The most performant supported profile */
 static int acer_predator_v4_max_perf;
 
@@ -1424,72 +1418,57 @@ static acpi_status AMW0_get_u32(u32 *value, u32 cap)
 
 	switch (cap) {
 	case ACER_CAP_MAILLED:
-		switch (quirks->mailled) {
-		default:
-			err = ec_read(0xA, &result);
-			if (err)
-				return AE_ERROR;
-			*value = (result >> 7) & 0x1;
-			return AE_OK;
-		}
-		break;
+		if (!quirks->mailled)
+			return AE_BAD_PARAMETER;
+		err = ec_read(0xA, &result);
+		if (err)
+			return AE_ERROR;
+		*value = (result >> 7) & 0x1;
+		return AE_OK;
 	case ACER_CAP_WIRELESS:
 		switch (quirks->wireless) {
 		case 1:
 			err = ec_read(0x7B, &result);
-			if (err)
-				return AE_ERROR;
-			*value = result & 0x1;
-			return AE_OK;
+			break;
 		case 2:
 			err = ec_read(0x71, &result);
-			if (err)
-				return AE_ERROR;
-			*value = result & 0x1;
-			return AE_OK;
+			break;
 		case 3:
 			err = ec_read(0x78, &result);
-			if (err)
-				return AE_ERROR;
-			*value = result & 0x1;
-			return AE_OK;
+			break;
 		default:
 			err = ec_read(0xA, &result);
-			if (err)
-				return AE_ERROR;
-			*value = (result >> 2) & 0x1;
-			return AE_OK;
+			break;
 		}
-		break;
+		if (err)
+			return AE_ERROR;
+		*value = result & 0x1;
+		return AE_OK;
 	case ACER_CAP_BLUETOOTH:
-		switch (quirks->bluetooth) {
-		default:
-			err = ec_read(0xA, &result);
-			if (err)
-				return AE_ERROR;
-			*value = (result >> 4) & 0x1;
-			return AE_OK;
-		}
-		break;
+		if (!quirks->bluetooth)
+			return AE_BAD_PARAMETER;
+		err = ec_read(0xA, &result);
+		if (err)
+			return AE_ERROR;
+		*value = (result >> 4) & 0x1;
+		return AE_OK;
 	case ACER_CAP_BRIGHTNESS:
-		switch (quirks->brightness) {
-		default:
-			err = ec_read(0x83, &result);
-			if (err)
-				return AE_ERROR;
-			*value = result;
-			return AE_OK;
-		}
-		break;
+		if (quirks->brightness < 0)
+			return AE_BAD_PARAMETER;
+		err = ec_read(0x83, &result);
+		if (err)
+			return AE_ERROR;
+		*value = result;
+		return AE_OK;
 	default:
-		return AE_ERROR;
+		return AE_BAD_PARAMETER;
 	}
-	return AE_OK;
 }
 
 static acpi_status AMW0_set_u32(u32 value, u32 cap)
 {
-	struct wmab_args args;
+	struct wmab_args args = {};
+	acpi_status status;
 
 	args.eax = ACER_AMW0_WRITE;
 	args.ebx = value ? (1<<8) : 0;
@@ -1516,10 +1495,16 @@ static acpi_status AMW0_set_u32(u32 value, u32 cap)
 			return AE_BAD_PARAMETER;
 		switch (quirks->brightness) {
 		default:
-			return ec_write(0x83, value);
+			status = ec_write(0x83, value);
+			if (status)
+				return status;
+			break;
+		default:
+			return AE_BAD_PARAMETER;
 		}
+		break;
 	default:
-		return AE_ERROR;
+		return AE_BAD_PARAMETER;
 	}
 
 	/* Actually do the set */
@@ -1740,6 +1725,7 @@ static acpi_status WMID_get_u32(u32 *value, u32 cap)
 static acpi_status WMID_set_u32(u32 value, u32 cap)
 {
 	u32 method_id = 0;
+	acpi_status status;
 	char param;
 
 	switch (cap) {
@@ -1771,13 +1757,18 @@ static acpi_status WMID_set_u32(u32 value, u32 cap)
 			i8042_lock_chip();
 			i8042_command(&param, 0x1059);
 			i8042_unlock_chip();
-			return 0;
+			return AE_OK;
 		}
-		break;
+		return AE_BAD_PARAMETER;
 	default:
-		return AE_ERROR;
+		return AE_BAD_PARAMETER;
 	}
-	return WMI_execute_u32(method_id, (u32)value, NULL);
+
+	status = WMI_execute_u32(method_id, (u32)value, NULL);
+	if (ACPI_FAILURE(status))
+		return status;
+
+	return AE_OK;
 }
 
 static acpi_status wmid3_get_device_status(u32 *value, u16 device)
@@ -1801,15 +1792,17 @@ static acpi_status wmid3_get_device_status(u32 *value, u16 device)
 		return status;
 
 	obj = output.pointer;
-
 	if (!obj)
 		return AE_ERROR;
-	else if (obj->type != ACPI_TYPE_BUFFER) {
+
+	if (obj->type != ACPI_TYPE_BUFFER) {
+		pr_err("Unexpected object type %d\n", obj->type);
 		kfree(obj);
 		return AE_ERROR;
 	}
+
 	if (obj->buffer.length != 8) {
-		pr_warn("Unknown buffer length %d\n", obj->buffer.length);
+		pr_err("Unexpected buffer length %d\n", obj->buffer.length);
 		kfree(obj);
 		return AE_ERROR;
 	}
@@ -1832,6 +1825,9 @@ static acpi_status wmid_v2_get_u32(u32 *value, u32 cap)
 {
 	u16 device;
 
+	if (!(interface->capability & cap))
+		return AE_BAD_PARAMETER;
+
 	switch (cap) {
 	case ACER_CAP_WIRELESS:
 		device = ACER_WMID3_GDS_WIRELESS;
@@ -1843,7 +1839,7 @@ static acpi_status wmid_v2_get_u32(u32 *value, u32 cap)
 		device = ACER_WMID3_GDS_THREEG;
 		break;
 	default:
-		return AE_ERROR;
+		return AE_BAD_PARAMETER;
 	}
 	return wmid3_get_device_status(value, device);
 }
@@ -1880,15 +1876,17 @@ static acpi_status wmid3_set_device_status(u32 value, u16 device)
 		return status;
 
 	obj = output.pointer;
-
 	if (!obj)
 		return AE_ERROR;
-	else if (obj->type != ACPI_TYPE_BUFFER) {
+
+	if (obj->type != ACPI_TYPE_BUFFER) {
+		pr_err("Unexpected object type %d\n", obj->type);
 		kfree(obj);
 		return AE_ERROR;
 	}
+
 	if (obj->buffer.length != 8) {
-		pr_warn("Unknown buffer length %d\n", obj->buffer.length);
+		pr_err("Unexpected buffer length %d\n", obj->buffer.length);
 		kfree(obj);
 		return AE_ERROR;
 	}
@@ -1911,15 +1909,17 @@ static acpi_status wmid3_set_device_status(u32 value, u16 device)
 		return status;
 
 	obj = output2.pointer;
-
 	if (!obj)
 		return AE_ERROR;
-	else if (obj->type != ACPI_TYPE_BUFFER) {
+
+	if (obj->type != ACPI_TYPE_BUFFER) {
+		pr_err("Unexpected object type %d\n", obj->type);
 		kfree(obj);
 		return AE_ERROR;
 	}
+
 	if (obj->buffer.length != 4) {
-		pr_warn("Unknown buffer length %d\n", obj->buffer.length);
+		pr_err("Unexpected buffer length %d\n", obj->buffer.length);
 		kfree(obj);
 		return AE_ERROR;
 	}
@@ -1939,6 +1939,9 @@ static acpi_status wmid_v2_set_u32(u32 value, u32 cap)
 {
 	u16 device;
 
+	if (!(interface->capability & cap))
+		return AE_BAD_PARAMETER;
+
 	switch (cap) {
 	case ACER_CAP_WIRELESS:
 		device = ACER_WMID3_GDS_WIRELESS;
@@ -1950,7 +1953,7 @@ static acpi_status wmid_v2_set_u32(u32 value, u32 cap)
 		device = ACER_WMID3_GDS_THREEG;
 		break;
 	default:
-		return AE_ERROR;
+		return AE_BAD_PARAMETER;
 	}
 	return wmid3_set_device_status(value, device);
 }
@@ -2152,6 +2155,7 @@ static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 static acpi_status WMID_gaming_set_u64(u64 value, u32 cap)
 {
 	u32 method_id = 0;
+	acpi_status status;
 
 	if (!(interface->capability & cap))
 		return AE_BAD_PARAMETER;
@@ -2168,17 +2172,25 @@ static acpi_status WMID_gaming_set_u64(u64 value, u32 cap)
 		break;
 	case ACER_CAP_GAMINGKB_STATIC:
 		method_id = ACER_WMID_SET_GAMING_STATIC_LED_METHODID;
-		return WMI_gaming_execute_u64(method_id, value, NULL);
+		status = WMI_gaming_execute_u64(method_id, value, NULL);
+		if (ACPI_FAILURE(status))
+			return status;
+		return AE_OK;
 	default:
 		return AE_BAD_PARAMETER;
 	}
 
-	return WMI_gaming_execute_u64(method_id, value, NULL);
+	status = WMI_gaming_execute_u64(method_id, value, NULL);
+	if (ACPI_FAILURE(status))
+		return status;
+
+	return AE_OK;
 }
 
 static acpi_status WMID_gaming_set_u8_array(u8 array[], size_t array_size, u32 cap)
 {
 	u32 method_id = 0;
+	acpi_status status;
 
 	switch (cap) {
 	case ACER_CAP_GAMINGKB:
@@ -2187,9 +2199,14 @@ static acpi_status WMID_gaming_set_u8_array(u8 array[], size_t array_size, u32 c
 		method_id = ACER_WMID_SET_GAMINGKBBL_METHODID;
 		break;
 	default:
-		return AE_ERROR;
+		return AE_BAD_PARAMETER;
 	}
-	return WMI_gaming_execute_u8_array(method_id, array, array_size, NULL);
+
+	status = WMI_gaming_execute_u8_array(method_id, array, array_size, NULL);
+	if (ACPI_FAILURE(status))
+		return status;
+
+	return AE_OK;
 }
 
 static acpi_status WMID_gaming_get_u64(u64 *value, u32 cap)
@@ -2210,11 +2227,15 @@ static acpi_status WMID_gaming_get_u64(u64 *value, u32 cap)
 	default:
 		return AE_BAD_PARAMETER;
 	}
-	status = WMI_gaming_execute_u64(method_id, input, &result);
-	if (ACPI_SUCCESS(status))
-		*value = (u64) result;
 
-	return status;
+	status = WMI_gaming_execute_u64(method_id, input, &result);
+	if (ACPI_FAILURE(status))
+		return status;
+
+	if (value)
+		*value = result;
+
+	return AE_OK;
 }
 
 static void WMID_gaming_set_fan_mode(u8 fan_mode)
@@ -2240,19 +2261,18 @@ static void WMID_gaming_set_fan_mode(u8 fan_mode)
 
 static int WMID_gaming_set_misc_setting(enum acer_wmi_gaming_misc_setting setting, u8 value)
 {
-	acpi_status status;
 	u64 input = 0;
 	u64 result;
+	u8 status_value;
 
 	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK, setting);
 	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_VALUE_MASK, value);
 
-	status = WMI_gaming_execute_u64(ACER_WMID_SET_GAMING_MISC_SETTING_METHODID, input, &result);
-	if (ACPI_FAILURE(status))
+	if (WMI_gaming_execute_u64(ACER_WMID_SET_GAMING_MISC_SETTING_METHODID, input, &result))
 		return -EIO;
 
-	/* The return status must be zero for the operation to have succeeded */
-	if (FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result))
+	status_value = FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result);
+	if (status_value)
 		return -EIO;
 
 	return 0;
@@ -2265,6 +2285,9 @@ static int WMID_gaming_get_misc_setting(enum acer_wmi_gaming_misc_setting settin
 	u64 result;
 	int ret;
 
+	if (!value)
+		return -EINVAL;
+
 	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK, setting);
 
 	ret = WMI_gaming_execute_u32_u64(ACER_WMID_GET_GAMING_MISC_SETTING_METHODID, input,
@@ -2272,7 +2295,6 @@ static int WMID_gaming_get_misc_setting(enum acer_wmi_gaming_misc_setting settin
 	if (ret < 0)
 		return ret;
 
-	/* The return status must be zero for the operation to have succeeded */
 	if (FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result))
 		return -EIO;
 
